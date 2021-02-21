@@ -1,0 +1,446 @@
+NAME: timescale-db
+LAST DEPLOYED: Mon Feb 15 08:59:19 2021
+NAMESPACE: timescale-db
+STATUS: pending-install
+REVISION: 1
+TEST SUITE: None
+HOOKS:
+MANIFEST:
+---
+# Source: timescaledb-multinode/templates/serviceaccount-timescaledb.yaml
+# This file and its contents are licensed under the Apache License 2.0.
+# Please see the included NOTICE for copyright information and LICENSE for a copy of the license.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: timescale-db-timescaledb
+  labels:
+    app: timescale-db-timescaledb
+    chart: timescaledb-multinode-0.8.0
+    release: timescale-db
+    heritage: Helm
+---
+# Source: timescaledb-multinode/templates/sec-timescaledb.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: timescale-db-timescaledb-access
+  labels:
+    app: timescale-db-timescaledb
+    chart: timescaledb-multinode-0.8.0
+    release: timescale-db
+    heritage: Helm
+type: Opaque
+data:
+  password-superuser: Ymt4eWpGdnI=
+...
+---
+# Source: timescaledb-multinode/templates/sec-timescaledb.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: timescale-db-timescaledb-data
+  labels:
+    app: timescale-db-timescaledb
+    chart: timescaledb-multinode-0.8.0
+    release: timescale-db
+    heritage: Helm
+type: Opaque
+data:
+  password-superuser: dFJ0WXhxb2o=
+...
+---
+# Source: timescaledb-multinode/templates/svc-timescaledb-access.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: timescale-db-timescaledb
+  labels:
+    app: timescale-db-timescaledb
+    chart: timescaledb-multinode-0.8.0
+    release: timescale-db
+    heritage: Helm
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-connection-idle-timeout: "4000"
+spec:
+  type: ClusterIP
+  ports:
+  - name: postgresql
+    port: 5432
+    protocol: TCP
+  selector:
+    app: timescale-db-timescaledb
+    timescaleNodeType: access
+...
+---
+# Source: timescaledb-multinode/templates/svc-timescaledb-data.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: timescale-db-timescaledb-data
+  labels:
+    app: timescale-db-timescaledb
+    chart: timescaledb-multinode-0.8.0
+    release: timescale-db
+    heritage: Helm
+spec:
+  clusterIP: None
+  ports:
+  - name: postgresql
+    port: 5432
+    protocol: TCP
+  selector:
+    app: timescale-db-timescaledb
+    timescaleNodeType: data
+...
+---
+# Source: timescaledb-multinode/templates/statefulset-timescaledb-accessnode.yaml
+# This file and its contents are licensed under the Apache License 2.0.
+# Please see the included NOTICE for copyright information and LICENSE for a copy of the license.
+
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: timescale-db-timescaledb-access
+  labels:
+    app: timescale-db-timescaledb
+    chart: timescaledb-multinode-0.8.0
+    release: timescale-db
+    heritage: Helm
+spec:
+  serviceName: timescale-db-timescaledb-access
+  replicas: 1
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: timescale-db-timescaledb
+      release: timescale-db
+      timescaleNodeType: access
+  template:
+    metadata:
+      name: timescale-db-timescaledb-access
+      labels:
+        app: timescale-db-timescaledb
+        release: timescale-db
+        timescaleNodeType: access
+    spec:
+      serviceAccountName: timescale-db-timescaledb
+      securityContext:
+        # The postgres user inside the TimescaleDB image has uid=1000.
+        # This configuration ensures the permissions of the mounts are suitable
+        fsGroup: 1000
+        runAsGroup:  1000
+        runAsNonRoot: true
+        runAsUser:  1000
+      initContainers:
+      - name: initdb
+        securityContext:
+          allowPrivilegeEscalation: false
+        image: "timescale/timescaledb-ha:pg12.5-ts2.0.0-p0"
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: POSTGRESQL_CUSTOM_PARAMETERS
+          value: |
+            log_checkpoints = 'on'
+            log_connections = 'on'
+            log_line_prefix = '%t [%p]: [%c-%l] %u@%d,app=%a [%e] '
+            log_lock_waits = 'on'
+            log_min_duration_statement = '1s'
+            log_statement = 'ddl'
+            max_connections = '100'
+            max_prepared_transactions = '150'
+            max_wal_size = '512MB'
+            min_wal_size = '256MB'
+            shared_buffers = '300MB'
+            temp_file_limit = '1GB'
+            timescaledb.passfile = '../.pgpass'
+            work_mem = '16MB'
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: timescale-db-timescaledb-access
+              key: password-superuser
+        - name: POSTGRES_PASSWORD_DATA_NODE
+          valueFrom:
+            secretKeyRef:
+              name: timescale-db-timescaledb-data
+              key: password-superuser
+        - name: LC_ALL
+          value: C.UTF-8
+        - name: LANG
+          value: C.UTF-8
+        - name: PGDATA
+          value: /var/lib/postgresql/pgdata
+        command:
+          - sh
+          - '-c'
+          # By calling the original entrypoint with the first argument being postgres
+          # we ensure we do everything that is required to init a PostgreSQL instance.
+          # By supplying --single however, we ensure the postmaster is running in the
+          # foreground, allowing us to do some more initialization
+          - |
+            set -e
+            install -o postgres -g postgres -m 0700 -d "${PGDATA}"
+            /docker-entrypoint.sh postgres --single < /dev/null
+            grep -qxF "include 'postgresql_helm_customizations.conf'" "${PGDATA}/postgresql.conf" \
+                || echo "include 'postgresql_helm_customizations.conf'" >> "${PGDATA}/postgresql.conf"
+            echo "Writing custom PostgreSQL Parameters to ${PGDATA}/postgresql_helm_customizations.conf"
+            echo "cluster_name = '$(hostname)'" > "${PGDATA}/postgresql_helm_customizations.conf"
+            echo "${POSTGRESQL_CUSTOM_PARAMETERS}" | sort >> "${PGDATA}/postgresql_helm_customizations.conf"
+            echo "*:*:*:postgres:${POSTGRES_PASSWORD_DATA_NODE}" > "${PGDATA}/../.pgpass"
+            chown postgres:postgres "${PGDATA}/../.pgpass" "${PGDATA}/postgresql_helm_customizations.conf"
+            chmod 0600 "${PGDATA}/../.pgpass"
+        volumeMounts:
+        - name: storage-volume
+          mountPath: "/var/lib/postgresql"
+          subPath: ""
+      containers:
+      - name: timescaledb
+        securityContext:
+          allowPrivilegeEscalation: false
+        image: "timescale/timescaledb-ha:pg12.5-ts2.0.0-p0"
+        imagePullPolicy: IfNotPresent
+        # We start postgres with a fully cleared environment
+        command:
+          - sh
+          - '-c'
+          - exec env -i PGDATA="${PGDATA}" PATH="${PATH}" /docker-entrypoint.sh postgres
+        env:
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.namespace
+        - name: LC_ALL
+          value: C.UTF-8
+        - name: LANG
+          value: C.UTF-8
+        - name: PGDATA
+          value: /var/lib/postgresql/pgdata
+        ports:
+        - containerPort: 5432
+        volumeMounts:
+        - name: storage-volume
+          mountPath: "/var/lib/postgresql"
+          subPath: ""
+        resources:
+          {}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              topologyKey: "kubernetes.io/hostname"
+              labelSelector:
+                matchLabels:
+                  app:  timescaledb
+                  release: "timescale-db"
+        
+  volumeClaimTemplates:
+    - metadata:
+        name: storage-volume
+        annotations:
+        labels:
+          app: timescale-db-timescaledb
+          release: timescale-db
+          heritage: Helm
+      spec:
+        accessModes:
+        - ReadWriteOnce
+        resources:
+          requests:
+            storage: "5G"
+---
+# Source: timescaledb-multinode/templates/statefulset-timescaledb-datanode.yaml
+# This file and its contents are licensed under the Apache License 2.0.
+# Please see the included NOTICE for copyright information and LICENSE for a copy of the license.
+
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: timescale-db-timescaledb-data
+  labels:
+    app: timescale-db-timescaledb
+    chart: timescaledb-multinode-0.8.0
+    release: timescale-db
+    heritage: Helm
+spec:
+  serviceName: timescale-db-timescaledb-data
+  replicas: 3
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: timescale-db-timescaledb
+      release: timescale-db
+      timescaleNodeType: data
+  template:
+    metadata:
+      name: timescale-db-timescaledb-data
+      labels:
+        app: timescale-db-timescaledb
+        release: timescale-db
+        timescaleNodeType: data
+    spec:
+      serviceAccountName: timescale-db-timescaledb
+      securityContext:
+        # The postgres user inside the TimescaleDB image has uid=1000.
+        # This configuration ensures the permissions of the mounts are suitable
+        fsGroup: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        runAsUser:  1000
+      initContainers:
+      - name: initdb
+        securityContext:
+          allowPrivilegeEscalation: false
+        image: "timescale/timescaledb-ha:pg12.5-ts2.0.0-p0"
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: POSTGRESQL_CUSTOM_PARAMETERS
+          value: |
+            log_checkpoints = 'on'
+            log_connections = 'on'
+            log_line_prefix = '%t [%p]: [%c-%l] %u@%d,app=%a [%e] '
+            log_lock_waits = 'on'
+            log_min_duration_statement = '1s'
+            log_statement = 'ddl'
+            max_connections = '100'
+            max_prepared_transactions = '150'
+            max_wal_size = '512MB'
+            min_wal_size = '256MB'
+            shared_buffers = '300MB'
+            temp_file_limit = '1GB'
+            timescaledb.passfile = '../.pgpass'
+            work_mem = '16MB'
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: timescale-db-timescaledb-data
+              key: password-superuser
+        - name: LC_ALL
+          value: C.UTF-8
+        - name: LANG
+          value: C.UTF-8
+        - name: PGDATA
+          value: /var/lib/postgresql/pgdata
+        command:
+          - sh
+          - '-c'
+          # By calling the original entrypoint with the first argument being postgres
+          # we ensure we do everything that is required to init a PostgreSQL instance.
+          # By supplying --single however, we ensure the postmaster is running in the
+          # foreground, allowing us to do some more initialization
+          - |
+            set -e
+            install -o postgres -g postgres -m 0700 -d "${PGDATA}" "${PGDATA}/../conf.d"
+            /docker-entrypoint.sh postgres --single < /dev/null
+            grep -qxF "include 'postgresql_helm_customizations.conf'" "${PGDATA}/postgresql.conf" \
+                || echo "include 'postgresql_helm_customizations.conf'" >> "${PGDATA}/postgresql.conf"
+            echo "Writing custom PostgreSQL Parameters to ${PGDATA}/postgresql_helm_customizations.conf"
+            echo "cluster_name = '$(hostname)'" > "${PGDATA}/postgresql_helm_customizations.conf"
+            echo "${POSTGRESQL_CUSTOM_PARAMETERS}" | sort >> "${PGDATA}/postgresql_helm_customizations.conf"
+            # The TimescaleDB extension should not be available by default, as this interferes with the bootstrapping
+            # done by the access nodes. Therefore we drop the extensions from template1
+            echo "DROP EXTENSION timescaledb" | /docker-entrypoint.sh postgres --single -D "${PGDATA}" template1
+        volumeMounts:
+        - name: storage-volume
+          mountPath: "/var/lib/postgresql"
+          subPath: ""
+      containers:
+      - name: timescaledb
+        securityContext:
+          allowPrivilegeEscalation: false
+        image: "timescale/timescaledb-ha:pg12.5-ts2.0.0-p0"
+        imagePullPolicy: IfNotPresent
+        # We start postgres with a fully cleared environment
+        command:
+          - sh
+          - '-c'
+          - exec env -i PGDATA="${PGDATA}" PATH="${PATH}" /docker-entrypoint.sh postgres
+        env:
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.namespace
+        - name: LC_ALL
+          value: C.UTF-8
+        - name: LANG
+          value: C.UTF-8
+        - name: PGDATA
+          value: /var/lib/postgresql/pgdata
+        ports:
+        - containerPort: 5432
+        volumeMounts:
+        - name: storage-volume
+          mountPath: "/var/lib/postgresql"
+          subPath: ""
+        resources:
+          {}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              topologyKey: "kubernetes.io/hostname"
+              labelSelector:
+                matchLabels:
+                  app:  timescaledb
+                  release: "timescale-db"
+        
+  volumeClaimTemplates:
+    - metadata:
+        name: storage-volume
+        annotations:
+        labels:
+          app: timescale-db-timescaledb
+          release: timescale-db
+          heritage: Helm
+      spec:
+        accessModes:
+        - ReadWriteOnce
+        resources:
+          requests:
+            storage: "5G"
+---
+# Source: timescaledb-multinode/templates/sec-timescaledb.yaml
+# This file and its contents are licensed under the Apache License 2.0.
+# Please see the included NOTICE for copyright information and LICENSE for a copy of the license.
+---
+# Source: timescaledb-multinode/templates/svc-timescaledb-access.yaml
+# This file and its contents are licensed under the Apache License 2.0.
+# Please see the included NOTICE for copyright information and LICENSE for a copy of the license.
+---
+# Source: timescaledb-multinode/templates/svc-timescaledb-data.yaml
+# This file and its contents are licensed under the Apache License 2.0.
+# Please see the included NOTICE for copyright information and LICENSE for a copy of the license.
+
+NOTES:
+# This file and its contents are licensed under the Apache License 2.0.
+# Please see the included NOTICE for copyright information and LICENSE for a copy of the license.
+
+TimescaleDB can be accessed via port 5432 on the following DNS name from within your cluster:
+timescale-db-timescaledb.timescale-db.svc.cluster.local
+
+To get your password for superuser run:
+
+    # superuser password
+    PGPASSWORD_SUPERUSER=$(kubectl get secret --namespace timescale-db timescale-db-timescaledb -o jsonpath="{.data.password-superuser}" | base64 --decode)
+
+    # admin password
+    PGPASSWORD_ADMIN=$(kubectl get secret --namespace timescale-db timescale-db-timescaledb -o jsonpath="{.data.password-admin}" | base64 --decode)
+
+To connect to your database:
+
+1. Run a postgres pod and connect using the psql cli:
+    # login as superuser
+    kubectl run -i --tty --rm psql --image=postgres \
+      --env "PGPASSWORD=$PGPASSWORD_SUPERUSER" \
+      --command -- psql -U postgres \
+      -h timescale-db-timescaledb.timescale-db.svc.cluster.local postgres
+
+    # login as admin
+    kubectl run -i -tty --rm psql --image=postgres \
+      --env "PGPASSWORD=$PGPASSWORD_ADMIN" \
+      --command -- psql -U admin \
+      -h timescale-db-timescaledb.timescale-db.svc.cluster.local postgres

@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: application-server
+  namespace: chirpstack
+  labels:
+    app: chirpstack
+    component: application-server
+spec:
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: chirpstack
+      component: application-server
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: chirpstack
+        component: application-server
+    spec:
+      containers:
+      - image: chirpstack/chirpstack-application-server
+        imagePullPolicy: Always
+        name: application-server
+        ports:
+        - name: ui-port
+          containerPort: 8080
+        - name: join-port
+          containerPort: 8003
+        - name: http-port
+          containerPort: 8001
+        - name: monitoring-port
+          containerPort: 8101
+        volumeMounts:
+        - mountPath: /etc/chirpstack-application-server
+          name: application-server-config
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext: {}
+      terminationGracePeriodSeconds: 30
+      volumes:
+      - configMap:
+          defaultMode: 420
+          name: application-server-config
+        name: application-server-config

@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: network-server
+  namespace: chirpstack
+  labels:
+    app: chirpstack
+    component: network-server
+spec:
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: chirpstack
+      component: network-server
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: chirpstack
+        component: network-server
+    spec:
+      containers:
+      - image: chirpstack/chirpstack-network-server
+        imagePullPolicy: Always
+        name: network-server
+        ports:
+        - containerPort: 8000
+          name: api
+        - containerPort: 8004
+          name: monitoring
+        volumeMounts:
+        - mountPath: /etc/chirpstack-network-server
+          name: network-server-config
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext: {}
+      terminationGracePeriodSeconds: 30
+      volumes:
+      - configMap:
+          defaultMode: 420
+          name: network-server-config
+        name: network-server-config
